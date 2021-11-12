@@ -109,7 +109,9 @@ has the entry (\"tags\" . \"#\"), these will appear as
 
 (defcustom org-roam-ref-annotation-function #'org-roam-ref-read--annotation
   "This function used to attach annotations for `org-roam-ref-read'.
-It takes a single argument REF, which is a propertized string.")
+It takes a single argument REF, which is a propertized string."
+  :group 'org-roam
+  :type  '(function))
 
 ;;;; Completion-at-point
 (defcustom org-roam-completion-everywhere nil
@@ -144,7 +146,7 @@ It takes a single argument REF, which is a propertized string.")
 (cl-defstruct (org-roam-node (:constructor org-roam-node-create)
                              (:copier nil))
   "A heading or top level file with an assigned ID property."
-  file file-hash file-atime file-mtime
+  file file-title file-hash file-atime file-mtime
   id level point todo priority scheduled deadline title properties olp
   tags aliases refs)
 
@@ -260,7 +262,7 @@ Return nil if there's no node with such REF."
        ((string-match org-link-plain-re ref)
         (setq type (match-string 1 ref)
               path (match-string 2 ref)))
-       ((string-equal (substring ref 0 1) "@")
+       ((string-prefix-p "@" ref)
         (setq type "cite"
               path (substring ref 1))))
       (when (and type path)
@@ -287,10 +289,10 @@ nodes."
                                                  :limit 1]
                                                 (org-roam-node-id node)))))
     (pcase-let* ((`(,file ,level ,pos ,todo ,priority ,scheduled ,deadline ,title ,properties ,olp) node-info)
-                 (`(,atime ,mtime) (car (org-roam-db-query [:select [atime mtime]
-                                                            :from files
-                                                            :where (= file $s1)]
-                                                           file)))
+                 (`(,atime ,mtime ,file-title) (car (org-roam-db-query [:select [atime mtime title]
+                                                                        :from files
+                                                                        :where (= file $s1)]
+                                                                       file)))
                  (tag-info (mapcar #'car (org-roam-db-query [:select [tag] :from tags
                                                              :where (= node-id $s1)]
                                                             (org-roam-node-id node))))
@@ -301,6 +303,7 @@ nodes."
                                                               :where (= node-id $s1)]
                                                              (org-roam-node-id node)))))
       (setf (org-roam-node-file node) file
+            (org-roam-node-file-title node) file-title
             (org-roam-node-file-atime node) atime
             (org-roam-node-file-mtime node) mtime
             (org-roam-node-level node) level
@@ -323,6 +326,7 @@ nodes."
                "SELECT
   id,
   file,
+  filetitle,
   \"level\",
   todo,
   pos,
@@ -342,6 +346,7 @@ FROM
   SELECT
     id,
     file,
+    filetitle,
     \"level\",
     todo,
     pos,
@@ -372,6 +377,7 @@ FROM
       nodes.olp as olp,
       files.atime as atime,
       files.mtime as mtime,
+      files.title as filetitle,
       tags.tag as tags,
       aliases.alias as aliases,
       '(' || group_concat(RTRIM (refs.\"type\", '\"') || ':' || LTRIM(refs.ref, '\"'), ' ') || ')' as refs
@@ -384,13 +390,14 @@ FROM
   GROUP BY id, tags )
 GROUP BY id")))
     (cl-loop for row in rows
-             append (pcase-let* ((`(,id ,file ,level ,todo ,pos ,priority ,scheduled ,deadline
+             append (pcase-let* ((`(,id ,file ,file-title ,level ,todo ,pos ,priority ,scheduled ,deadline
                                         ,title ,properties ,olp ,atime ,mtime ,tags ,aliases ,refs)
                                   row)
                                  (all-titles (cons title aliases)))
                       (mapcar (lambda (temp-title)
                                 (org-roam-node-create :id id
                                                       :file file
+                                                      :file-title file-title
                                                       :file-atime atime
                                                       :file-mtime mtime
                                                       :level level
@@ -594,7 +601,8 @@ TEMPLATE is the processed template used to format the entry."
 
 (defun org-roam-node-read-sort-by-file-mtime (completion-a completion-b)
   "Sort files such that files modified more recently are shown first.
-COMPLETION-A and COMPLETION-B are items in the form of (node-title org-roam-node-struct)"
+COMPLETION-A and COMPLETION-B are items in the form of
+\(node-title org-roam-node-struct)"
   (let ((node-a (cdr completion-a))
         (node-b (cdr completion-b)))
     (time-less-p (org-roam-node-file-mtime node-b)
@@ -602,7 +610,8 @@ COMPLETION-A and COMPLETION-B are items in the form of (node-title org-roam-node
 
 (defun org-roam-node-read-sort-by-file-atime (completion-a completion-b)
   "Sort files such that files accessed more recently are shown first.
-COMPLETION-A and COMPLETION-B are items in the form of (node-title org-roam-node-struct)"
+COMPLETION-A and COMPLETION-B are items in the form of
+\(node-title org-roam-node-struct)"
   (let ((node-a (cdr completion-a))
         (node-b (cdr completion-b)))
     (time-less-p (org-roam-node-file-atime node-b)
@@ -662,19 +671,19 @@ The INFO, if provided, is passed to the underlying `org-roam-capture-'."
   (add-hook 'org-open-at-point-functions #'org-roam-open-id-at-point nil t))
 
 (defun org-roam-open-id-at-point ()
-  "Try to navigate \"id:\" link to find and visit node with an assigned ID.
-Assumes that the cursor was put where the link is."
-  (let* ((context (org-element-context))
-         (type (org-element-property :type context))
-         (id (org-element-property :path context)))
-    (when (string= type "id")
-      (let ((node (org-roam-populate (org-roam-node-create :id id))))
-        (cond
-         ((org-roam-node-file node)
-          (org-mark-ring-push)
-          (org-roam-node-visit node nil 'force)
-          t)
-         (t nil))))))
+  "Navigate to \"id:\" link at point using the Org-roam database."
+  (when (org-in-regexp org-link-any-re)
+    (let ((link (match-string 2))
+          id)
+      (when (string-prefix-p "id:" link)
+        (setq id (substring-no-properties link 3))
+        (let ((node (org-roam-populate (org-roam-node-create :id id))))
+          (cond
+           ((org-roam-node-file node)
+            (org-mark-ring-push)
+            (org-roam-node-visit node nil 'force)
+            t)
+           (t nil)))))))
 
 ;;;;; [roam:] link
 (org-link-set-parameters "roam" :follow #'org-roam-link-follow-link)
@@ -727,7 +736,7 @@ Assumes that the cursor was put where the link is."
 
 ;;;;;; Completion-at-point interface
 (defconst org-roam-bracket-completion-re
-  "\\[\\[\\(\\(?:roam:\\)?\\)\\([^z-a]*\\)]]"
+  "\\[\\[\\(\\(?:roam:\\)?\\)\\([^z-a]*?\\)]]"
   "Regex for completion within link brackets.
 We use this as a substitute for `org-link-bracket-re', because
 `org-link-bracket-re' requires content within the brackets for a match.")
@@ -940,7 +949,7 @@ links to headings/files within the current `org-roam-directory'
 that are excluded from identification in Org-roam as
 `org-roam-node's, e.g. with \"ROAM_EXCLUDE\" property."
   (interactive)
-  (cl-loop with files for dir in (cons org-roam-directory directories)
+  (cl-loop for dir in (cons org-roam-directory directories)
            for org-roam-directory = dir
            nconc (org-roam-list-files) into files
            finally (org-id-update-id-locations files org-roam-verbose)))
@@ -1084,7 +1093,7 @@ and when nil is returned the node will be filtered out."
   (let ((node (org-roam-node-at-point 'assert)))
     (save-excursion
       (goto-char (org-roam-node-point node))
-      (org-roam-add-property alias "ROAM_ALIASES"))))
+      (org-roam-property-add "ROAM_ALIASES" alias))))
 
 (defun org-roam-alias-remove (&optional alias)
   "Remove an ALIAS from the node at point."
@@ -1092,7 +1101,7 @@ and when nil is returned the node will be filtered out."
   (let ((node (org-roam-node-at-point 'assert)))
     (save-excursion
       (goto-char (org-roam-node-point node))
-      (org-roam-remove-property "ROAM_ALIASES" alias))))
+      (org-roam-property-remove "ROAM_ALIASES" alias))))
 
 
 (provide 'org-roam-node)

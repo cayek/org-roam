@@ -34,6 +34,11 @@
 
 (require 'org-roam)
 
+(defun org-roam-require (libs)
+  "Require LIBS."
+  (dolist (lib libs)
+    (require lib nil 'noerror)))
+
 ;;; String utilities
 ;; TODO Refactor this.
 (defun org-roam-replace-string (old new s)
@@ -47,18 +52,23 @@
     (org-roam-replace-string "\\" "\\\\")
     (org-roam-replace-string "\"" "\\\"")))
 
+(defun org-roam-string-equal (s1 s2)
+  "Return t if S1 and S2 are equal.
+Like `string-equal', but case-insensitive."
+  (and (= (length s1) (length s2))
+       (or (string-equal s1 s2)
+           (string-equal (downcase s1) (downcase s2)))))
+
 ;;; List utilities
-(defmacro org-roam-plist-map! (fn plist)
-  "Map FN over PLIST, modifying it in-place."
-  (declare (indent 1))
-  (let ((plist-var (make-symbol "plist"))
-        (k (make-symbol "k"))
-        (v (make-symbol "v")))
-    `(let ((,plist-var (copy-sequence ,plist)))
-       (while ,plist-var
-         (setq ,k (pop ,plist-var))
-         (setq ,v (pop ,plist-var))
-         (setq ,plist (plist-put ,plist ,k (funcall ,fn ,k ,v)))))))
+(defun org-roam-plist-map! (fn plist)
+  "Map FN over PLIST, modifying it in-place and returning it.
+FN must take two arguments: the key and the value."
+  (let ((plist-index plist))
+    (while plist-index
+      (let ((key (pop plist-index)))
+        (setf (car plist-index) (funcall fn key (car plist-index))
+              plist-index (cdr plist-index)))))
+  plist)
 
 ;;; File utilities
 (defmacro org-roam-with-file (file keep-buf-p &rest body)
@@ -140,6 +150,8 @@ value (possibly nil). Adapted from `s-format'."
       (set-match-data saved-match-data))))
 
 ;;; Fontification
+(defvar org-ref-buffer-hacked)
+
 (defun org-roam-fontify-like-in-org-mode (s)
   "Fontify string S like in Org mode.
 Like `org-fontify-like-in-org-mode', but supports `org-ref'."
@@ -231,12 +243,13 @@ If BOUND, scan up to BOUND bytes of the buffer."
 (defun org-roam-end-of-meta-data (&optional full)
   "Like `org-end-of-meta-data', but supports file-level metadata.
 
-When optional argument FULL is t, also skip planning information,
-clocking lines and any kind of drawer.
-
 When FULL is non-nil but not t, skip planning information,
-properties, clocking lines and logbook drawers."
+properties, clocking lines and logbook drawers.
+
+When optional argument FULL is t, skip everything above, and also
+skip keywords."
   (org-back-to-heading-or-point-min t)
+  (when (org-at-heading-p) (forward-line))
   ;; Skip planning information.
   (when (looking-at-p org-planning-line-re) (forward-line))
   ;; Skip property drawer.
@@ -256,11 +269,14 @@ properties, clocking lines and logbook drawers."
             (if (re-search-forward "^[ \t]*:END:[ \t]*$" end t)
                 (forward-line)
               (throw 'exit t)))
-           ;; When FULL is t, skip regular drawer too.
-           ((and (eq full t) (looking-at-p org-drawer-regexp))
+           ((looking-at-p org-drawer-regexp)
             (if (re-search-forward "^[ \t]*:END:[ \t]*$" end t)
                 (forward-line)
               (throw 'exit t)))
+           ;; When FULL is t, skip keywords too.
+           ((and (eq full t)
+                 (looking-at-p org-keyword-regexp))
+            (forward-line))
            (t (throw 'exit t))))))))
 
 (defun org-roam-set-keyword (key value)
@@ -272,7 +288,7 @@ If the property is already set, it's value is replaced."
           (if (string-blank-p value)
               (kill-whole-line)
             (replace-match (concat " " value) 'fixedcase nil nil 1))
-        (org-roam-end-of-meta-data)
+        (org-roam-end-of-meta-data 'drawers)
         (if (save-excursion (end-of-line) (eobp))
             (progn
               (end-of-line)
