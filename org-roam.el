@@ -276,6 +276,7 @@ E.g. (\".org\") => (\"*.org\" \"*.org.gpg\")"
          (command (string-join `(,executable "-L" ,dir "-type f \\(" ,names "\\)") " ")))
     (org-roam--shell-command-files command)))
 
+
 (defun org-roam--list-files-fd (executable dir)
   "Return all Org-roam files under DIR, using \"fd\", provided as EXECUTABLE."
   (let* ((globs (org-roam--list-files-search-globs org-roam-file-extensions))
