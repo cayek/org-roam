@@ -70,6 +70,23 @@ FN must take two arguments: the key and the value."
               plist-index (cdr plist-index)))))
   plist)
 
+(defmacro org-roam-dolist-with-progress (spec msg &rest body)
+  "Loop over a list and report progress in the echo area.
+Like `dolist-with-progress-reporter', but falls back to `dolist'
+if the function does not yet exist.
+
+Evaluate BODY with VAR bound to each car from LIST, in turn.
+Then evaluate RESULT to get return value, default nil.
+
+MSG is a progress reporter object or a string.  In the latter
+case, use this string to create a progress reporter.
+
+SPEC is a list, as per `dolist'."
+  (declare (indent 2))
+  (if (fboundp 'dolist-with-progress-reporter)
+      `(dolist-with-progress-reporter ,spec ,msg ,@body)
+    `(dolist ,spec ,@body)))
+
 ;;; File utilities
 (defmacro org-roam-with-file (file keep-buf-p &rest body)
   "Execute BODY within FILE.
@@ -87,7 +104,7 @@ Kills the buffer if KEEP-BUF-P is nil, and FILE is not yet visited."
                      (find-file-noselect ,file)))) ; Else, visit FILE and return buffer
           res)
      (with-current-buffer buf
-       (unless (equal major-mode 'org-mode)
+       (unless (derived-mode-p 'org-mode)
          (delay-mode-hooks
            (let ((org-inhibit-startup t)
                  (org-agenda-files nil))
@@ -354,6 +371,16 @@ If VAL is not specified, user is prompted to select a value."
         (org-set-property prop (combine-and-quote-strings lst))
       (org-delete-property prop))
     prop-to-remove))
+
+;;; Refs
+(defun org-roam-org-ref-path-to-keys (path)
+  "Return a list of keys given an org-ref cite: PATH.
+Accounts for both v2 and v3."
+  (cond ((fboundp 'org-ref-parse-cite-path)
+         (mapcar (lambda (cite) (plist-get cite :key))
+                 (plist-get (org-ref-parse-cite-path path) :references)))
+        ((fboundp 'org-ref-split-and-strip-string)
+         (org-ref-split-and-strip-string path))))
 
 ;;; Logs
 (defvar org-roam-verbose)
