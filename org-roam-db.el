@@ -54,7 +54,7 @@ a compiler. See https://nullprogram.com/blog/2014/02/06/."
                  (const sqlite3)
                  (symbol :tag "other")))
 
-(defcustom org-roam-db-location (expand-file-name "org-roam.db" user-emacs-directory)
+(defcustom org-roam-db-location (locate-user-emacs-file "org-roam.db")
   "The path to file where the Org-roam database is stored.
 
 It is the user's responsibility to set this correctly, especially
@@ -101,12 +101,6 @@ slow."
 ;;; Variables
 (defconst org-roam-db-version 18)
 
-;; TODO Rename this
-(defconst org-roam--sqlite-available-p
-  (with-demoted-errors "Org-roam initialization: %S"
-    (emacsql-sqlite-ensure-binary)
-    t))
-
 (defvar org-roam-db--connection (make-hash-table :test #'equal)
   "Database connection to Org-roam database.")
 
@@ -145,6 +139,7 @@ Performs a database upgrade when required."
     (let ((init-db (not (file-exists-p org-roam-db-location))))
       (make-directory (file-name-directory org-roam-db-location) t)
       (let ((conn (funcall (org-roam-db--conn-fn) org-roam-db-location)))
+        (emacsql conn [:pragma (= foreign_keys ON)])
         (when-let ((process (emacsql-process conn)))
           (set-process-query-on-exit-flag process nil))
         (puthash (expand-file-name (file-name-as-directory org-roam-directory))
@@ -244,7 +239,6 @@ The query is expected to be able to fail, in this situation, run HANDLER."
 (defun org-roam-db--init (db)
   "Initialize database DB with the correct schema and user version."
   (emacsql-with-transaction db
-    (emacsql db "PRAGMA foreign_keys = ON")
     (pcase-dolist (`(,table ,schema) org-roam-db--table-schemata)
       (emacsql db [:create-table $i1 $S2] table schema))
     (pcase-dolist (`(,index-name ,table ,columns) org-roam-db--table-indices)
@@ -338,12 +332,12 @@ If UPDATE-P is non-nil, first remove the file in the database."
 
 (defun org-roam-db-map-nodes (fns)
   "Run FNS over all nodes in the current buffer."
-  (org-with-point-at 1
-    (org-map-entries
-     (lambda ()
-       (when (org-roam-db-node-p)
-         (dolist (fn fns)
-           (funcall fn)))))))
+  (org-map-region
+   (lambda ()
+     (when (org-roam-db-node-p)
+       (dolist (fn fns)
+         (funcall fn))))
+   (point-min) (point-max)))
 
 (defun org-roam-db-map-links (fns)
   "Run FNS over all links in the current buffer."
@@ -482,16 +476,32 @@ INFO is the org-element parsed buffer."
     (let (rows)
       (dolist (ref refs)
         (save-match-data
-          (cond ((string-prefix-p "@" ref)
+          (cond (;; @citeKey
+                 (string-prefix-p "@" ref)
                  (push (vector node-id (substring ref 1) "cite") rows))
-                ((string-match org-link-plain-re ref)
+                (;; [cite:@citeKey]
+                 (string-prefix-p "[cite:" ref)
+                 (condition-case nil
+                     (let ((cite-obj (org-cite-parse-objects ref)))
+                       (org-element-map cite-obj 'citation-reference
+                         (lambda (cite)
+                           (let ((key (org-element-property :key cite)))
+                             (push (vector node-id key "cite") rows)))))
+                   (error
+                    (lwarn '(org-roam) :warning
+                           "%s:%s\tInvalid cite %s, skipping..." (buffer-file-name) (point) ref))))
+                (;; https://google.com, cite:citeKey
+                 ;; Note: we use string-match here because it matches any link: e.g. [[cite:abc][abc]]
+                 ;; But this form of matching is loose, and can accept invalid links e.g. [[cite:abc]
+                 (string-match org-link-plain-re ref)
                  (let ((link-type (match-string 1 ref))
                        (path (match-string 2 ref)))
                    (if (and (boundp 'org-ref-cite-types)
                             (or (assoc link-type org-ref-cite-types)
                                 (member link-type org-ref-cite-types)))
                        (dolist (key (org-roam-org-ref-path-to-keys path))
-                         (push (vector node-id key link-type) rows)))))
+                         (push (vector node-id key link-type) rows))
+                     (push (vector node-id path link-type) rows))))
                 (t
                  (lwarn '(org-roam) :warning
                         "%s:%s\tInvalid ref %s, skipping..." (buffer-file-name) (point) ref)))))
